@@ -6,6 +6,7 @@ package arbstate
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"github.com/offchainlabs/nitro/arbos/l1pricing"
 	"github.com/offchainlabs/nitro/arbutil"
 	"github.com/offchainlabs/nitro/das/dastree"
+	"github.com/offchainlabs/nitro/das/zerogravity"
 	"github.com/offchainlabs/nitro/util/blobs"
 	"github.com/offchainlabs/nitro/zeroheavy"
 )
@@ -357,6 +359,64 @@ func (b *dAProviderForBlobReader) RecoverPayloadFromBatch(
 		return nil, nil
 	}
 	return payload, nil
+}
+
+// NewDAProviderBlobReader is generally meant to be only used by nitro.
+// DA Providers should implement methods in the DataAvailabilityProvider interface independently
+func NewDAProviderZg(zgReader ZgDataAvailabilityReader) *dAProviderForZg {
+	return &dAProviderForZg{
+		zgReader: zgReader,
+	}
+}
+
+type dAProviderForZg struct {
+	zgReader ZgDataAvailabilityReader
+}
+
+func (b *dAProviderForZg) IsValidHeaderByte(headerByte byte) bool {
+	return IsZgMessageHeaderByte(headerByte)
+}
+
+func (b *dAProviderForZg) RecoverPayloadFromBatch(
+	ctx context.Context,
+	batchNum uint64,
+	batchBlockHash common.Hash,
+	sequencerMsg []byte,
+	preimages map[arbutil.PreimageType]map[common.Hash][]byte,
+	keysetValidationMode KeysetValidationMode,
+) ([]byte, error) {
+	log.Info("start recovering payload from zgda")
+
+	var shaPreimages map[common.Hash][]byte
+	if preimages != nil {
+		if preimages[arbutil.Sha2_256PreimageType] == nil {
+			preimages[arbutil.Sha2_256PreimageType] = make(map[common.Hash][]byte)
+		}
+		shaPreimages = preimages[arbutil.Sha2_256PreimageType]
+	}
+
+	blobBytes := sequencerMsg[41:]
+	var blobRequestParams []zerogravity.BlobRequestParams
+	err := rlp.DecodeBytes(blobBytes, &blobRequestParams)
+	if err != nil {
+		return nil, err
+	}
+
+	blobs, err := b.zgReader.Read(ctx, blobRequestParams)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get blobs: %w", err)
+	}
+
+	// record preimage data
+	log.Info("Recording preimage data for zgda")
+	shaDataHash := sha256.New()
+	shaDataHash.Write(blobBytes)
+	dataHash := shaDataHash.Sum([]byte{})
+	if shaPreimages != nil {
+		shaPreimages[common.BytesToHash(dataHash)] = blobs
+	}
+
+	return blobs, nil
 }
 
 type KeysetValidationMode uint8
